@@ -5,8 +5,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * *'
-  # push:
-  #   branches: ['master']
 
 permissions:
   contents: read
@@ -24,80 +22,94 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      
       - name: Install Calibre
         run: |
           sudo apt-get update
           sudo apt-get install libegl1 libopengl0 libxcb-cursor0
           url=https://download.calibre-ebook.com/linux-installer.sh
           sudo -v && wget -nv -O- $url | sudo sh /dev/stdin
-      - name: Retrieving Recipe
+      
+      - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Checking Recipe
+      
+      - name: Find and Validate Recipes
         run: |
-          declare -A recipe_paths
-          add_recipe() {
-            local name="$(basename "$recipe_path")"
-            local key=$(echo "$name" | md5sum | cut -d ' ' -f 1)
-            recipe_paths[$key]="$recipe_path"
-          }
-          if [ -f 'recipe_list.txt' ]; then
-            while read recipe_path || [ -n "$recipe_path" ]; do
-              if [ ! -n "$recipe_path" ]; then continue; fi
-              title="${recipe_path%.recipe}"
-              result="$(ebook-convert --list-recipes | grep "$title" || true)"
-              if [ ! -n "$result" ]; then
-                echo "Recipe \"$recipe_path\" does not exists"; continue
-              fi
-              if [ "${recipe_path##*.}" != 'recipe' ]; then
-                recipe_path="$recipe_path".recipe
-              fi
-              add_recipe
-            done < recipe_list.txt
+          # 创建输出目录
+          mkdir -p $output
+          
+          # 查找所有的 recipe 文件
+          find . -name "*.recipe" -type f > recipe_list.txt
+          
+          # 检查是否找到了 recipe 文件
+          if [ ! -s recipe_list.txt ]; then
+            echo "No recipe files found"
+            exit 1
           fi
-          while read -d '' recipe_path; do
-            add_recipe
-          done < <(find . -maxdepth 1 -type f -name '*.recipe' -print0)
-          for key in ${!recipe_paths[@]}; do
-            recipe_path="${recipe_paths[$key]}"
-            echo "Recipe path: $recipe_path"
-            echo "$recipe_path" >> temp_recipe_list.txt
-          done
-          count=${#recipe_paths[@]}
-          echo "Recipe count: $count"
-          if [ $count -eq 0 ]; then
-            echo 'No recipe needs processing'; exit 1
-          fi
-      - name: Converting Ebook
+          
+          echo "Found recipes:"
+          cat recipe_list.txt
+      
+      - name: Convert Recipes to Ebooks
         run: |
-          mkdir $output
-          convert_ebook() {
-            ebook_name="${recipe_path%.*}"
-            ebook_path="$ebook_name.${ext,,}"
-            echo "Converting \"$recipe_path\" > \"$ebook_path\"..."
-            arguments="--authors=\"$author\" --publisher=\"$publisher\""
-            cover="covers/${ebook_name}.png"
-            if [ -f "$cover" ]; then arguments+=" --cover=\"$cover\""; fi
-            style="styles/${ebook_name}.css"
-            if [ -f "$style" ]; then arguments+=" --extra-css=\"$style\""; fi
-            echo $arguments | xargs ebook-convert "$recipe_path" "$ebook_path"
-            title=$(ebook-meta "${ebook_path}" | grep '^Title *:' |
-              sed 's/^Title *: *$$.*$$/\1/')
-            new_ebook_path="${output}/${title}.${ext,,}"
-            echo "Renaming \"$ebook_path\" > \"$new_ebook_path\""
-            mv "$ebook_path" "$new_ebook_path"
+          # 简化的转换函数
+          convert_recipe() {
+            local recipe_file="$1"
+            local base_name=$(basename "$recipe_file" .recipe)
+            
+            echo "Converting: $recipe_file"
+            
+            # 基本转换参数
+            args=()
+            args+=(--authors="$author")
+            args+=(--publisher="$publisher")
+            
+            # 检查是否存在对应的封面和样式文件
+            if [ -f "covers/${base_name}.png" ]; then
+              args+=(--cover="covers/${base_name}.png")
+            fi
+            
+            if [ -f "styles/${base_name}.css" ]; then
+              args+=(--extra-css="styles/${base_name}.css")
+            fi
+            
+            # 执行转换
+            ebook-convert "$recipe_file" "${base_name}.${ext}" "${args[@]}"
+            
+            # 直接将文件移动到输出目录，不重命名
+            if [ -f "${base_name}.${ext}" ]; then
+              mv "${base_name}.${ext}" "$output/"
+              echo "Successfully converted: $base_name.${ext}"
+            else
+              echo "Failed to convert: $recipe_file"
+              return 1
+            fi
           }
-          while read recipe_path || [ -n "$recipe_path" ]; do
-            convert_ebook &
-          done < temp_recipe_list.txt
-          wait
-          count=$(find "$output" -type f -name "*.${ext,,}" | wc -l)
-          echo "Ebook count: $count"
+          
+          # 导出函数和环境变量
+          export -f convert_recipe
+          export output author publisher ext
+          
+          # 并行转换所有食谱
+          cat recipe_list.txt | xargs -I {} -P 2 bash -c 'convert_recipe "$@"' _ {}
+          
+          # 统计结果
+          count=$(ls -1 "$output"/*."${ext}" 2>/dev/null | wc -l || echo 0)
+          echo "Successfully converted ebooks: $count"
+          
           if [ $count -eq 0 ]; then
-            echo 'No ebook was generated'; exit 1
+            echo "Warning: No ebooks were generated"
           fi
-      - name: Upload Generated Ebooks
+      
+      - name: List Generated Files
+        run: |
+          echo "Generated files in $output:"
+          ls -la "$output/" || echo "No files generated"
+      
+      - name: Upload Ebooks as Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Converted-Ebooks
+          name: News-Ebooks
           path: ${{ env.output }}
-          retention-days: ${{ secrets.RETENTION_DAYS || 30 }}
+          retention-days: 7
