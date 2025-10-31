@@ -101,15 +101,24 @@ jobs:
             echo "Warning: No ebooks were generated"
           fi
       
-      - name: List Generated Files
+      - name: Copy Ebooks to Root Directory
         run: |
-          echo "Generated files in $output:"
-          ls -la "$output/" || echo "No files generated"
-      
+          echo "Cleaning previous ebooks from root directory..."
+          rm -f *."${ext}" 2>/dev>/dev/null || true
+          
+          echo "Copying latest ebooks to root directory..."
+          cp "$output"/*."${ext}" ./ 2>/dev/null || echo "No ebooks to copy"
+          
+          # 验证复制结果
+          root_count=$(ls -1 *."${ext}" 2>/dev/null | wc -l || echo 0)
+          echo "Copied $root_count ebooks to root directory"
+           
       - name: Upload Ebooks as Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: News-Ebooks
-          path: ${{ env.output }}
+          path: |
+            ${{ env.output }}
+            *.${ {env.ext}}}
           retention-days: 7
