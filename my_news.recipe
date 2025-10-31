@@ -16,8 +16,9 @@ class MyCustomRecipe(BasicNewsRecipe):
     
     # 你的 RSS 订阅地址
     feeds = [
-        ('最新新闻', 'https://example.com/rss'),
-        ('科技新闻', 'https://tech.example.com/feed'),
+        ('新浪新闻', 'http://rss.sina.com.cn/news/marquee/ddt.xml'),
+        ('网易新闻', 'http://news.163.com/special/00011K6L/rss_newsattitude.xml'),
+        ('腾讯新闻', 'http://news.qq.com/newsgn/rss_newsgn.xml'),
     ]
     
     # 可选：设置封面
