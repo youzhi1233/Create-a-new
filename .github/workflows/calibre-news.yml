@@ -4,33 +4,20 @@ run-name: 'Calibre News Conversion: ${{ github.ref_name }}'
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 8 * * *'  # 每天早上8点运行
+    - cron: '0 0 * * *'
 
 permissions:
-  contents: write  # 增加写入权限以便推送更改
+  contents: read
 
 jobs:
   converter:
     runs-on: ubuntu-latest
     env:
-      output_dir: converted_ebooks
+      output: converted_ebooks
       publisher: bookfere.com
       author: Calibre News Delivery
       ext: ${{ secrets.FORMAT || 'epub' }}
-    
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Clean Previous Run
-        run: |
-          echo "🧹 Cleaning previous conversion results..."
-          # 删除旧的输出目录和根目录的电子书
-          rm -rf ${{ env.output_dir }} 
-          find . -maxdepth 1 -name -name "*.${{ env.ext }}" -delete 2>/dev/null || true
-      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -39,111 +26,90 @@ jobs:
       - name: Install Calibre
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0
-          sudo -v && wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sudo sh /dev/stdin
+          sudo apt-get install libegl1 libopengl0 libxcb-cursor0
+          url=https://download.calibre-ebook.com/linux-installer.sh
+          sudo -v && wget -nv -O- $url | sudo sh /dev/stdin
       
-      - name: Find Available Recipes
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Find and Validate Recipes
         run: |
-          # 查找所有 recipe 文件
+          # 创建输出目录
+          mkdir -p $output
+          
+          # 查找所有的 recipe 文件
           find . -name "*.recipe" -type f > recipe_list.txt
           
+          # 检查是否找到了 recipe 文件
           if [ ! -s recipe_list.txt ]; then
-            echo "❌ No recipe files found"
+            echo "No recipe files found"
             exit 1
           fi
           
-          echo "📋 Found $(wc -l < recipe_list.txt) recipes:"
+          echo "Found recipes:"
           cat recipe_list.txt
       
       - name: Convert Recipes to Ebooks
         run: |
-          mkdir -p $output_dir
-          total_success=0
-          
-                   
-          while IFS= read -r recipe_file; do
-            [ -z "$recipe_file" ] && continue
+          # 简化的转换函数
+          convert_recipe() {
+            local recipe_file="$1"
+            local base_name=$(basename "$recipe_file" .recipe)
             
-            base_name=$(basename "$recipe_file" .recipe)
-            output_file="${base_name}.${ext}"
+            echo "Converting: $recipe_file"
+            
+            # 基本转换参数
+            args=()
+            args+=(--authors="$author")
+            args+=(--publisher="$publisher")
+            
+            # 检查是否存在对应的封面和样式文件
+            if [ -f "covers/${base_name}.png" ]; then
+              args+=(--cover="covers/${base_name}.png")
+            fi
+            
+            if [ -f "styles/${base_name}.css" ]; then
+              args+=(--extra-css="styles/${base_name}.css")
+            fi
+            
+            # 执行转换
+            ebook-convert "$recipe_file" "${base_name}.${ext}" "${args[@]}"
+            
+            # 直接将文件移动到输出目录，不重命名
+            if [ -f "${base_name}.${ext}" ]; then
+              mv "${base_name}.${ext}" "$output/"
+              echo "Successfully converted: $base_name.${ext}"
+            else
+              echo "Failed to convert: $recipe_file"
+              return 1
+            fi
+          }
           
-          echo "🔄 Converting: $recipe_file"
+          # 导出函数和环境变量
+          export -f convert_recipe
+          export output author publisher ext
           
-          # 准备转换参数
-          args="--authors='$author' --publisher='$publisher'"
+          # 并行转换所有食谱
+          cat recipe_list.txt | xargs -I {} -P 2 bash -c 'convert_recipe "$@"' _ {}
           
-          # 添加封面（如果有）
-          if [ -f "covers/${base_name}.png" ]; then
-              args="$args --cover='covers/${base_name}.png'"
-          fi
+          # 统计结果
+          count=$(ls -1 "$output"/*."${ext}" 2>/dev/null | wc -l || echo 0)
+          echo "Successfully converted ebooks: $count"
           
-          # 执行转换
-          if eval ebook-convert "'$recipe_file'" "'$output_file'" $args; then
-              # 复制到输出目录备份
-              cp "$output_file" "$output_dir/"
-              echo "✅ Success: $output_file"
-              ((total_success++))
-          else
-              echo "❌ Failed: $recipe_file"
-          fi
-          
-          done < recipe_list.txt
-          
-          echo "📊 Conversion complete: $total_success ebooks generated"
-          
-          if [ $total_success -eq 0 ]; then
-              echo "⚠️ No ebooks were produced"
+          if [ $count -eq 0 ]; then
+            echo "Warning: No ebooks were generated"
           fi
       
-      - name: Commit and Push Ebooks to Repository
+      - name: List Generated Files
         run: |
-          echo "🚀 Committing new ebooks to repository..."
-          
-          # 配置 git
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          # 查看当前状态
-          echo "Current changes:"
-          git status
-          
-          # 添加新建的电子书文件
-          git add *."${ext}" 2>/dev/null || true
-          
-          # 检查是否有可提交的内容
-          if git diff-index --quiet HEAD --; then
-            echo "📝 No new ebooks to commit"
-          else
-            # 提交更改
-            git commit -m "Add newly converted ebooks - $(date '+%Y-%m-%d %H:%M')"
-          fi
-          
-          # 强制推送更改
-          git push origin HEAD:${{ github.ref_name }} || echo "Push may have failed but workflow continues"
+          echo "Generated files in $output:"
+          ls -la "$output/" || echo "No files generated"
       
-      - name: Show Final Results
-        run: |
-          echo "🎉 Final Results:"
-          echo "Root directory ebooks:"
-          ls -la *."${ext}" 2>/dev/null || echo "No ebooks in root directory"
-      
-      - name: Upload Artifact for Manual Download
+      - name: Upload Ebooks as Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: News-Ebooks-${{ github.run_number }}
-          path: "*.${ {env.ext}}}"
-          retention-days: 7
-      
-      - name: Create Summary Report
-        run: |
-          echo "# 📚 Calibre News Conversion Report" > conversion_summary.md
-          echo "" >> conversion_summary.md
-          echo "**Run Number:** ${{ github.run_number }}" >> conversion_summary.md
-          echo "**Branch:** ${{ github.ref_name }}" >> conversion_summary.md
-          echo "**Trigger:** ${{ github.event_name }}" >> conversion-directory.md
-          echo "**Date:** $(date)" >> conversion_summary.md
-          echo "" >> conversion_summary.md
-          echo "## Generated Files:" >> conversion_summary.md
-          ls -1 *."${ext}" 2>/dev/null | while read file; do
-            size=$(du -h "$file" | cut -f1)
-            echo "- $file ($size)" >> conversion_summary.md
+          name: News-Ebooks
+          path: ${{ env.output }}
+          retention-days: 7添加一个功能保存转换成功的ebooks到根目录
